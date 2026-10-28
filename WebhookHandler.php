@@ -66,11 +66,10 @@ class WebhookHandler extends Base
         switch ($type) {
             case self::TYPE_PUSH:
                 return $this->handlePush($payload);
-            case self::TYPE_ISSUE;
+            case self::TYPE_ISSUE:
                 return $this->handleIssueEvent($payload);
-            case self::TYPE_ISSUE_COMMENT;
-                return $this->handleCommentEvent($payload);
-            case self::TYPE_COMMENT;
+            case self::TYPE_ISSUE_COMMENT:
+            case self::TYPE_COMMENT:
                 return $this->handleCommentEvent($payload);
         }
 
@@ -122,14 +121,23 @@ class WebhookHandler extends Base
             return false;
         }
 
+        $authorName = '';
+        if (! empty($commit['author']['name'])) {
+            $authorName = $commit['author']['name'];
+        } elseif (! empty($commit['author']['username'])) {
+            $authorName = $commit['author']['username'];
+        }
+
+        $commitUrl = isset($commit['url']) ? $commit['url'] : '';
+
         $this->dispatcher->dispatch(
-            self::EVENT_COMMIT,
             new GenericEvent(array(
                 'task_id' => $task_id,
                 'commit_message' => $commit['message'],
-                'commit_url' => $commit['url'],
-                'comment' => $commit['message']."\n\n[".t('Commit made by @%s on Gitea', $commit['author']['name'] ?: $commit['author']['username']).']('.$commit['url'].')',
-            ) + $task)
+                'commit_url' => $commitUrl,
+                'comment' => $commit['message']."\n\n[".t('Commit made by @%s on Gitea', $authorName).']('.$commitUrl.')',
+            ) + $task),
+            self::EVENT_COMMIT
         );
 
         return true;
@@ -170,24 +178,26 @@ class WebhookHandler extends Base
     public function handleIssueOpened(array $issue, array $repo)
     {
         if (isset($issue['html_url'])) {
-          $issue_url = $issue['html_url'];
+            $issue_url = $issue['html_url'];
+        } elseif (isset($issue['url'])) {
+            $issue_url = str_replace('api/v1/repos/', '', $issue['url']);
         } else {
-          $issue_url = str_replace('api/v1/repos/','',$issue['url']);
-        } 
+            $issue_url = '';
+        }
         $task_reference = $repo['full_name']."#".$issue['number'];
-        $description = $issue['body'];
+        $description = isset($issue['body']) ? $issue['body'] : '';
         $description .= "\n\n[".t('Gitea Issue').']('.$issue_url.')';
         $event = array(
             'project_id' => $this->project_id,
             'reference' => $task_reference,
-            'title' => $issue['title'],
+            'title' => isset($issue['title']) ? $issue['title'] : '',
             'description' => $description,
-            'assignee_id' => $issue['assignee']['id'],
-            'author_id' => $issue['user']['id'],
+            'assignee_id' => ! empty($issue['assignee']['id']) ? $issue['assignee']['id'] : null,
+            'author_id' => ! empty($issue['user']['id']) ? $issue['user']['id'] : null,
         );
         $this->dispatcher->dispatch(
-            self::EVENT_ISSUE_OPENED,
-            new GenericEvent($event)
+            new GenericEvent($event),
+            self::EVENT_ISSUE_OPENED
         );
         return true;
     }
@@ -208,12 +218,12 @@ class WebhookHandler extends Base
                 'project_id' => $this->project_id,
                 'task_id' => $task['id'],
                 'reference' => $task_reference,
-                'assignee_id' => $issue['assignee_id'],
-                'author_id' => $issue['author_id'],
+                'assignee_id' => isset($issue['assignee']['id']) ? $issue['assignee']['id'] : (isset($issue['assignee_id']) ? $issue['assignee_id'] : null),
+                'author_id' => isset($issue['user']['id']) ? $issue['user']['id'] : (isset($issue['author_id']) ? $issue['author_id'] : null),
             );
             $this->dispatcher->dispatch(
-                self::EVENT_ISSUE_REOPENED,
-                new GenericEvent($event)
+                new GenericEvent($event),
+                self::EVENT_ISSUE_REOPENED
             );
             return true;
         }
@@ -236,12 +246,12 @@ class WebhookHandler extends Base
                 'project_id' => $this->project_id,
                 'task_id' => $task['id'],
                 'reference' => $task_reference,
-                'assignee_id' => $issue['assignee_id'],
-                'author_id' => $issue['author_id'],
+                'assignee_id' => isset($issue['assignee']['id']) ? $issue['assignee']['id'] : (isset($issue['assignee_id']) ? $issue['assignee_id'] : null),
+                'author_id' => isset($issue['user']['id']) ? $issue['user']['id'] : (isset($issue['author_id']) ? $issue['author_id'] : null),
             );
             $this->dispatcher->dispatch(
-                self::EVENT_ISSUE_CLOSED,
-                new GenericEvent($event)
+                new GenericEvent($event),
+                self::EVENT_ISSUE_CLOSED
             );
             return true;
         }
@@ -258,8 +268,13 @@ class WebhookHandler extends Base
      */
     public function handleIssueAssigned(array $issue, array $repo)
     {
+        if (empty($issue['assignee'])) {
+            return false;
+        }
+
         $task_reference = $repo['full_name']."#".$issue['number'];
-        $user = $this->userModel->getByUsername($issue['assignee']['login']);
+        $username = isset($issue['assignee']['login']) ? $issue['assignee']['login'] : (isset($issue['assignee']['username']) ? $issue['assignee']['username'] : '');
+        $user = ! empty($username) ? $this->userModel->getByUsername($username) : null;
         $task = $this->taskFinderModel->getByReference($this->project_id, $task_reference);
         if (! empty($user) && ! empty($task) && $this->projectPermissionModel->isAssignable($this->project_id, $user['id'])) {
             $event = array(
@@ -269,8 +284,8 @@ class WebhookHandler extends Base
                 'reference' => $task_reference,
             );
             $this->dispatcher->dispatch(
-                self::EVENT_ISSUE_ASSIGNEE_CHANGE,
-                new GenericEvent($event)
+                new GenericEvent($event),
+                self::EVENT_ISSUE_ASSIGNEE_CHANGE
             );
             return true;
         }
@@ -292,12 +307,12 @@ class WebhookHandler extends Base
             $event = array(
                 'project_id' => $this->project_id,
                 'task_id' => $task['id'],
-                'owner_id' => null,
+                'owner_id' => 0,
                 'reference' => $task_reference,
             );
             $this->dispatcher->dispatch(
-                self::EVENT_ISSUE_ASSIGNEE_CHANGE,
-                new GenericEvent($event)
+                new GenericEvent($event),
+                self::EVENT_ISSUE_ASSIGNEE_CHANGE
             );
             return true;
         }
@@ -313,18 +328,29 @@ class WebhookHandler extends Base
      */
     public function handleCommentEvent(array $payload)
     {
-        if (! isset($payload['issue'])) {
+        if (! isset($payload['issue']) || ! isset($payload['repository'])) {
             return false;
         }
         $task_reference = $payload['repository']['full_name']."#".$payload['issue']['number'];
         $task = $this->taskFinderModel->getByReference($this->project_id, $task_reference);
         if (! empty($task)) {
-            $user = $this->userModel->getByUsername($payload['user']['username']);
+            $username = '';
+            if (! empty($payload['comment']['user']['username'])) {
+                $username = $payload['comment']['user']['username'];
+            } elseif (! empty($payload['comment']['user']['login'])) {
+                $username = $payload['comment']['user']['login'];
+            } elseif (! empty($payload['user']['username'])) {
+                $username = $payload['user']['username'];
+            }
+
+            $user = ! empty($username) ? $this->userModel->getByUsername($username) : array();
             if (! empty($user) && ! $this->projectPermissionModel->isAssignable($this->project_id, $user['id'])) {
                 $user = array();
             }
-            $comment = $payload['comment']['body'];
-            $comment .= "\n\n[".t('By @%s on Gitea', $payload['comment']['user']['username']).']('.$payload['comment']['html_url'].')';
+            $comment = isset($payload['comment']['body']) ? $payload['comment']['body'] : '';
+            $commentAuthor = ! empty($username) ? $username : 'unknown';
+            $commentUrl = isset($payload['comment']['html_url']) ? $payload['comment']['html_url'] : '';
+            $comment .= "\n\n[".t('By @%s on Gitea', $commentAuthor).']('.$commentUrl.')';
             $event = array(
                 'project_id' => $this->project_id,
                 'reference' => $task_reference,
@@ -333,8 +359,8 @@ class WebhookHandler extends Base
                 'task_id' => $task['id'],
             );
             $this->dispatcher->dispatch(
-                self::EVENT_ISSUE_COMMENT,
-                new GenericEvent($event)
+                new GenericEvent($event),
+                self::EVENT_ISSUE_COMMENT
             );
             return true;
         }
